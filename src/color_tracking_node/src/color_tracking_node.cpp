@@ -16,7 +16,7 @@
 using namespace cv;
 using namespace std::chrono_literals;
 
-// 颜色模式
+// 颜色模式1
 enum class ColorMode { Red, Blue, Both };
 
 // 参数结构体
