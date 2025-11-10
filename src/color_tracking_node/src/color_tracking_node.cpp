@@ -16,7 +16,7 @@
 using namespace cv;
 using namespace std::chrono_literals;
 
-// 颜色模式1
+// 颜色模式
 enum class ColorMode { Red, Blue, Both };
 
 // 参数结构体
@@ -357,14 +357,15 @@ private:
     void publishResult(bool valid, double deflection_rad, int dy) {
         auto string_msg = std_msgs::msg::String();
         std::ostringstream oss;
+
+        oss << std::fixed << std::setprecision(2);
         
-        if (valid) {
-            float deflection_rad_float = static_cast<float>(deflection_rad);
-            oss << "1," << std::fixed << std::setprecision(2) << deflection_rad_float << "," << dy;
-        } else {
-            oss << "0,0.00,0";
-        }
+        float status = valid ? 1.00f : 0.00f;
+        float rad = valid ? static_cast<float>(deflection_rad) : 0.00f;
+        float y_offset = valid ? static_cast<float>(dy) : 0.00f;
         
+        oss << status << "," << rad << "," << y_offset;
+
         string_msg.data = oss.str();
         result_publisher_->publish(string_msg);
 
