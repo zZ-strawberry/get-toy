@@ -42,7 +42,7 @@ public:
             return;
         }
 
-        // 仅保留主显示窗口（已删除滑动调试窗口与辅助窗口）
+        // 仅保留主显示窗口
         cv::namedWindow("Black Object Detection", WINDOW_AUTOSIZE);
 
         RCLCPP_INFO(this->get_logger(), "黑色物体检测节点已启动 (HSV模式)");
@@ -84,7 +84,7 @@ private:
         
         bool found = false;
         float angle = 0.0f;
-        float yOffset = 0.0f; // 新增：y轴偏移
+        int32_t y_offset_px = 0; 
         Point2f center(0, 0);
         double maxArea = 0.0;
         vector<Point> maxContour;
@@ -108,7 +108,7 @@ private:
             float dx = center.x - imageCenter.x;
             float dy = imageCenter.y - center.y; // 上为正
             angle = std::atan2(dx, dy);
-            yOffset = center.y - imageCenter.y;  // 像素，向下为正
+            y_offset_px = static_cast<int32_t>(std::lround(center.y - imageCenter.y)); // 取整像素偏移
 
             // 可视化
             drawContours(frame, vector<vector<Point>>{maxContour}, -1, Scalar(0, 255, 0), 2);
@@ -123,7 +123,7 @@ private:
         }
 
         // 发布状态、弧度、y轴偏移
-        publishData(found, angle, yOffset);
+        publishData(found, angle, y_offset_px);
 
         // 十字线与显示
         circle(frame, imageCenter, 5, Scalar(255, 0, 0), -1);
@@ -134,17 +134,17 @@ private:
         waitKey(1);
     }
     
-    void publishData(bool hasTarget, float angle, float yOffset) {
+    void publishData(bool hasTarget, float angle, int32_t yOffsetPx) {
         auto status_msg = std_msgs::msg::Int32();
         status_msg.data = hasTarget ? 1 : 0;
         status_pub_->publish(status_msg);
 
         auto angle_msg = std_msgs::msg::Float32();
-        angle_msg.data = std::round(angle * 100.0f) / 100.0f; // 弧度
+        angle_msg.data = std::round(angle * 100.0f) / 100.0f; // 弧度保留两位小数
         angle_pub_->publish(angle_msg);
 
         auto offset_msg = std_msgs::msg::Int32();
-        offset_msg.data = static_cast<int32_t>(std::round(yOffset)); // y轴偏移（像素）
+        offset_msg.data = yOffsetPx; 
         offset_pub_->publish(offset_msg);
     }
     
