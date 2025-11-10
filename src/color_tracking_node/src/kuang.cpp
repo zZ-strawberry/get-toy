@@ -25,9 +25,9 @@ class BlackObjectDetectionNode : public rclcpp::Node {
 public:
     BlackObjectDetectionNode() : Node("black_object_detection_node") {
         // 创建发布器
-        status_pub_ = this->create_publisher<std_msgs::msg::Int32>("black_object/status", 10);
-        angle_pub_  = this->create_publisher<std_msgs::msg::Float32>("black_object/angle", 10);
-        offset_pub_ = this->create_publisher<std_msgs::msg::Int32>("black_object/offset", 10); // 改为Int32
+        status_pub_ = this->create_publisher<std_msgs::msg::Float32>("black_object/status", 10);  // 0.00 或 1.00
+        angle_pub_  = this->create_publisher<std_msgs::msg::Float32>("black_object/angle", 10);   // 弧度 两位小数
+        offset_pub_ = this->create_publisher<std_msgs::msg::Float32>("black_object/offset", 10);  // Y偏移 两位小数
         
         // 使用定时器处理帧
         timer_ = this->create_wall_timer(
@@ -135,16 +135,18 @@ private:
     }
     
     void publishData(bool hasTarget, float angle, int32_t yOffsetPx) {
-        auto status_msg = std_msgs::msg::Int32();
-        status_msg.data = hasTarget ? 1 : 0;
+        auto status_msg = std_msgs::msg::Float32();
+        float status_val = hasTarget ? 1.0f : 0.0f;
+        status_msg.data = std::round(status_val * 100.0f) / 100.0f; // 0.00 或 1.00
         status_pub_->publish(status_msg);
 
         auto angle_msg = std_msgs::msg::Float32();
-        angle_msg.data = std::round(angle * 100.0f) / 100.0f; // 弧度保留两位小数
+        angle_msg.data = std::round(angle * 100.0f) / 100.0f; // 弧度
         angle_pub_->publish(angle_msg);
 
-        auto offset_msg = std_msgs::msg::Int32();
-        offset_msg.data = yOffsetPx; 
+        auto offset_msg = std_msgs::msg::Float32();
+        float offset_val = static_cast<float>(yOffsetPx);
+        offset_msg.data = std::round(offset_val * 100.0f) / 100.0f; // 像素偏移
         offset_pub_->publish(offset_msg);
     }
     
@@ -156,9 +158,10 @@ private:
     int min_area_ = 10;  // 实际面积 = min_area_ * 100
     int morph_size_ = 3; // 形态学核大小
     
-    rclcpp::Publisher<std_msgs::msg::Int32>::SharedPtr status_pub_;
+    // 发布器类型全部改为 Float32
+    rclcpp::Publisher<std_msgs::msg::Float32>::SharedPtr status_pub_;
     rclcpp::Publisher<std_msgs::msg::Float32>::SharedPtr angle_pub_;
-    rclcpp::Publisher<std_msgs::msg::Int32>::SharedPtr offset_pub_; 
+    rclcpp::Publisher<std_msgs::msg::Float32>::SharedPtr offset_pub_; 
     rclcpp::TimerBase::SharedPtr timer_;
 };
 
