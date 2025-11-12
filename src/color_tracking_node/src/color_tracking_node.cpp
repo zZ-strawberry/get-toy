@@ -19,6 +19,28 @@ using namespace std::chrono_literals;
 // 颜色模式
 enum class ColorMode { Red, Blue, Both };
 
+// 形状类型
+enum class ShapeType { 
+    Triangle,   // 三角形
+    Rectangle,  // 矩形
+    Circle,     // 圆形
+    Unknown     // 未知形状（用于最规整轮廓）
+};
+
+// 目标信息结构体
+struct TargetInfo {
+    cv::Point2f center;
+    std::vector<cv::Point> contour;
+    ShapeType shape;
+    ColorMode color;
+    double regularity_score;  // 规整度分数 (0-1)
+    double area;
+    bool is_valid;
+    
+    TargetInfo() : shape(ShapeType::Unknown), color(ColorMode::Both), 
+                  regularity_score(0.0), area(0.0), is_valid(false) {}
+};
+
 // 参数结构体
 struct TrackingParams {
     int min_area = 2000;
@@ -30,6 +52,15 @@ struct TrackingParams {
     bool show_window = true;
     int smoothing_window = 5;
     double contour_epsilon = 0.015;
+    
+    // 形状识别参数
+    bool enable_shape_detection = true;
+    bool track_triangle = true;
+    bool track_rectangle = true;
+    bool track_circle = true;
+    double min_regularity = 0.5;  // 最小规整度阈值
+    double circularity_threshold = 0.7;  // 圆形度阈值
+    double rectangularity_threshold = 0.75;  // 矩形度阈值
 };
 
 // 轮廓平滑函数
@@ -43,9 +74,105 @@ static void smoothContour(std::vector<cv::Point>& contour, double epsilon_ratio 
     contour = approximated;
 }
 
-// 创建颜色掩码
-static void makeMaskHSV(const cv::Mat& hsv, ColorMode mode, cv::Mat& maskOut) {
-    cv::Mat maskRed, maskBlue;
+// 计算轮廓的规整度分数 (0-1)
+static double calculateRegularityScore(const std::vector<cv::Point>& contour) {
+    if (contour.size() < 3) return 0.0;
+    
+    double area = cv::contourArea(contour);
+    double perimeter = cv::arcLength(contour, true);
+    
+    if (perimeter < 1e-5) return 0.0;
+    
+    // 使用圆形度作为规整度的基础指标
+    // 圆形度 = 4π * 面积 / 周长²，完美的圆为1
+    double circularity = 4.0 * CV_PI * area / (perimeter * perimeter);
+    
+    // 凸包面积比
+    std::vector<cv::Point> hull;
+    cv::convexHull(contour, hull);
+    double hull_area = cv::contourArea(hull);
+    double convexity = (hull_area > 0) ? (area / hull_area) : 0.0;
+    
+    // 综合评分
+    return std::min(1.0, (circularity * 0.6 + convexity * 0.4));
+}
+
+// 识别形状类型
+static ShapeType recognizeShape(const std::vector<cv::Point>& contour, 
+                               double circularity_threshold = 0.7,
+                               double rectangularity_threshold = 0.75) {
+    if (contour.size() < 3) return ShapeType::Unknown;
+    
+    // 多边形近似
+    std::vector<cv::Point> approx;
+    double epsilon = 0.04 * cv::arcLength(contour, true);
+    cv::approxPolyDP(contour, approx, epsilon, true);
+    
+    int vertices = approx.size();
+    
+    // 计算圆形度
+    double area = cv::contourArea(contour);
+    double perimeter = cv::arcLength(contour, true);
+    double circularity = (perimeter > 0) ? (4.0 * CV_PI * area / (perimeter * perimeter)) : 0.0;
+    
+    // 圆形判断
+    if (circularity >= circularity_threshold && vertices > 6) {
+        return ShapeType::Circle;
+    }
+    
+    // 三角形判断
+    if (vertices == 3) {
+        return ShapeType::Triangle;
+    }
+    
+    // 矩形判断
+    if (vertices == 4) {
+        // 计算矩形度
+        cv::RotatedRect rect = cv::minAreaRect(contour);
+        double rect_area = rect.size.width * rect.size.height;
+        double rectangularity = (rect_area > 0) ? (area / rect_area) : 0.0;
+        
+        if (rectangularity >= rectangularity_threshold) {
+            return ShapeType::Rectangle;
+        }
+    }
+    
+    return ShapeType::Unknown;
+}
+
+// 获取形状名称
+static std::string getShapeName(ShapeType shape) {
+    switch (shape) {
+        case ShapeType::Triangle: return "Triangle";
+        case ShapeType::Rectangle: return "Rectangle";
+        case ShapeType::Circle: return "Circle";
+        case ShapeType::Unknown: return "Unknown";
+        default: return "Unknown";
+    }
+}
+
+// 判断颜色（通过HSV掩码位置）
+static ColorMode detectColor(const cv::Point2f& center, const cv::Mat& maskRed, const cv::Mat& maskBlue) {
+    int x = static_cast<int>(center.x);
+    int y = static_cast<int>(center.y);
+    
+    if (x < 0 || x >= maskRed.cols || y < 0 || y >= maskRed.rows) {
+        return ColorMode::Both;
+    }
+    
+    bool is_red = maskRed.at<uchar>(y, x) > 127;
+    bool is_blue = maskBlue.at<uchar>(y, x) > 127;
+    
+    if (is_red && !is_blue) return ColorMode::Red;
+    if (is_blue && !is_red) return ColorMode::Blue;
+    return ColorMode::Both;
+}
+
+// 创建颜色掩码（分别返回红色和蓝色掩码）
+static void makeMaskHSV(const cv::Mat& hsv, ColorMode mode, cv::Mat& maskOut, 
+                       cv::Mat& maskRed, cv::Mat& maskBlue) {
+    maskRed = cv::Mat::zeros(hsv.size(), CV_8UC1);
+    maskBlue = cv::Mat::zeros(hsv.size(), CV_8UC1);
 
     if (mode == ColorMode::Red || mode == ColorMode::Both) {
         cv::Mat lower, upper;
@@ -57,8 +184,8 @@ static void makeMaskHSV(const cv::Mat& hsv, ColorMode mode, cv::Mat& maskOut) {
         cv::inRange(hsv, cv::Scalar(100, 120, 60), cv::Scalar(140, 255, 255), maskBlue);
     }
 
-    if (mode == ColorMode::Red) maskOut = maskRed;
-    else if (mode == ColorMode::Blue) maskOut = maskBlue;
+    if (mode == ColorMode::Red) maskOut = maskRed.clone();
+    else if (mode == ColorMode::Blue) maskOut = maskBlue.clone();
     else cv::bitwise_or(maskRed, maskBlue, maskOut);
 
     cv::Mat kernel_open = cv::getStructuringElement(cv::MORPH_ELLIPSE, cv::Size(7, 7));
@@ -67,42 +194,128 @@ static void makeMaskHSV(const cv::Mat& hsv, ColorMode mode, cv::Mat& maskOut) {
     cv::morphologyEx(maskOut, maskOut, cv::MORPH_OPEN, kernel_open, cv::Point(-1,-1), 2);
     cv::morphologyEx(maskOut, maskOut, cv::MORPH_CLOSE, kernel_close, cv::Point(-1,-1), 2);
     cv::threshold(maskOut, maskOut, 127, 255, cv::THRESH_BINARY);
+    
+    // 对单独的红蓝掩码也做处理
+    if (!maskRed.empty() && cv::countNonZero(maskRed) > 0) {
+        cv::morphologyEx(maskRed, maskRed, cv::MORPH_OPEN, kernel_open, cv::Point(-1,-1), 2);
+        cv::morphologyEx(maskRed, maskRed, cv::MORPH_CLOSE, kernel_close, cv::Point(-1,-1), 2);
+    }
+    if (!maskBlue.empty() && cv::countNonZero(maskBlue) > 0) {
+        cv::morphologyEx(maskBlue, maskBlue, cv::MORPH_OPEN, kernel_open, cv::Point(-1,-1), 2);
+        cv::morphologyEx(maskBlue, maskBlue, cv::MORPH_CLOSE, kernel_close, cv::Point(-1,-1), 2);
+    }
 }
 
-// 在 mask 中查找最大轮廓及其中心
-static bool findLargestCenter(const cv::Mat& mask, cv::Point2f& center, 
-                             std::vector<cv::Point>& bestContour, 
-                             double minArea = 800.0) {
+// 查找最佳目标（优先匹配指定形状，否则选择最规整的轮廓）
+static bool findBestTarget(const cv::Mat& mask, 
+                          const cv::Mat& maskRed, 
+                          const cv::Mat& maskBlue,
+                          const TrackingParams& params,
+                          TargetInfo& target) {
     std::vector<std::vector<cv::Point>> contours;
-    cv::findContours(mask, contours, cv::RETR_EXTERNAL, cv::CHAIN_APPROX_SIMPLE);
+    cv::Mat mask_copy = mask.clone();
+    cv::findContours(mask_copy, contours, cv::RETR_EXTERNAL, cv::CHAIN_APPROX_SIMPLE);
     
-    double bestArea = 0.0; 
-    bestContour.clear();
+    if (contours.empty()) {
+        target.is_valid = false;
+        return false;
+    }
+    
+    // 候选目标列表
+    std::vector<TargetInfo> candidates;
     
     for (const auto& c : contours) {
-        double a = cv::contourArea(c);
-        if (a > minArea && a > bestArea) { 
-            bestArea = a; 
-            bestContour = c; 
+        double area = cv::contourArea(c);
+        
+        // 面积过滤
+        if (area < params.min_area || area > params.max_area) continue;
+        
+        TargetInfo candidate;
+        candidate.contour = c;
+        candidate.area = area;
+        
+        // 平滑轮廓
+        smoothContour(candidate.contour, params.contour_epsilon);
+        
+        // 计算凸包
+        std::vector<cv::Point> hull;
+        cv::convexHull(candidate.contour, hull);
+        if (hull.size() >= 3) {
+            candidate.contour = hull;
+        }
+        
+        // 计算中心
+        cv::Moments m = cv::moments(candidate.contour);
+        if (std::abs(m.m00) < 1e-5) continue;
+        candidate.center = cv::Point2f(static_cast<float>(m.m10 / m.m00), 
+                                       static_cast<float>(m.m01 / m.m00));
+        
+        // 识别形状
+        if (params.enable_shape_detection) {
+            candidate.shape = recognizeShape(candidate.contour, 
+                                            params.circularity_threshold,
+                                            params.rectangularity_threshold);
+        } else {
+            candidate.shape = ShapeType::Unknown;
+        }
+        
+        // 计算规整度
+        candidate.regularity_score = calculateRegularityScore(candidate.contour);
+        
+        // 检测颜色
+        candidate.color = detectColor(candidate.center, maskRed, maskBlue);
+        
+        candidate.is_valid = true;
+        candidates.push_back(candidate);
+    }
+    
+    if (candidates.empty()) {
+        target.is_valid = false;
+        return false;
+    }
+    
+    // 选择最佳目标
+    TargetInfo* best = nullptr;
+    double best_score = -1.0;
+    
+    for (auto& candidate : candidates) {
+        double score = 0.0;
+        
+        // 优先级1: 匹配指定形状
+        bool shape_match = false;
+        if (params.enable_shape_detection) {
+            if ((candidate.shape == ShapeType::Triangle && params.track_triangle) ||
+                (candidate.shape == ShapeType::Rectangle && params.track_rectangle) ||
+                (candidate.shape == ShapeType::Circle && params.track_circle)) {
+                shape_match = true;
+                score += 100.0;  // 形状匹配加高分
+            }
+        }
+        
+        // 优先级2: 如果没有形状匹配，使用规整度
+        if (!shape_match) {
+            score += candidate.regularity_score * 50.0;
+        }
+        
+        // 额外分数：面积（大目标优先）
+        score += (candidate.area / params.max_area) * 10.0;
+        
+        // 额外分数：规整度
+        score += candidate.regularity_score * 5.0;
+        
+        if (score > best_score) {
+            best_score = score;
+            best = &candidate;
         }
     }
     
-    if (bestContour.empty()) return false;
-    
-    smoothContour(bestContour, 0.015);
-    
-    std::vector<cv::Point> hull;
-    cv::convexHull(bestContour, hull);
-    if (hull.size() >= 3) {
-        bestContour = hull;
+    if (best && best->is_valid) {
+        target = *best;
+        return true;
     }
     
-    cv::Moments m = cv::moments(bestContour);
-    if (std::abs(m.m00) < 1e-5) return false;
-    
-    center = cv::Point2f(static_cast<float>(m.m10 / m.m00), 
-                         static_cast<float>(m.m01 / m.m00));
-    return true;
+    target.is_valid = false;
+    return false;
 }
 
 // 中心点平滑滤波器
@@ -197,6 +410,15 @@ public:
         this->declare_parameter<int>("image_width", 640);
         this->declare_parameter<int>("image_height", 480);
         this->declare_parameter<int>("fps", 30);
+        
+        // 形状识别参数
+        this->declare_parameter<bool>("enable_shape_detection", true);
+        this->declare_parameter<bool>("track_triangle", true);
+        this->declare_parameter<bool>("track_rectangle", true);
+        this->declare_parameter<bool>("track_circle", true);
+        this->declare_parameter<double>("min_regularity", 0.5);
+        this->declare_parameter<double>("circularity_threshold", 0.7);
+        this->declare_parameter<double>("rectangularity_threshold", 0.75);
 
         // 读取参数
         loadParameters();
@@ -228,6 +450,18 @@ public:
         RCLCPP_INFO(this->get_logger(), "颜色模式: %s", 
                    params_.color_mode == ColorMode::Red ? "RED" : 
                    params_.color_mode == ColorMode::Blue ? "BLUE" : "BOTH");
+        RCLCPP_INFO(this->get_logger(), "最小面积阈值: %d 像素", params_.min_area);
+        RCLCPP_INFO(this->get_logger(), "最大面积阈值: %d 像素", params_.max_area);
+        
+        if (params_.enable_shape_detection) {
+            RCLCPP_INFO(this->get_logger(), "形状识别: 启用 (三角形:%s 矩形:%s 圆形:%s)", 
+                       params_.track_triangle ? "√" : "×",
+                       params_.track_rectangle ? "√" : "×",
+                       params_.track_circle ? "√" : "×");
+            RCLCPP_INFO(this->get_logger(), "最小规整度: %.2f", params_.min_regularity);
+        } else {
+            RCLCPP_INFO(this->get_logger(), "形状识别: 禁用 (追踪最规整轮廓)");
+        }
     }
 
     ~ColorTrackingNode() {
@@ -262,6 +496,15 @@ private:
         image_width_ = this->get_parameter("image_width").as_int();
         image_height_ = this->get_parameter("image_height").as_int();
         fps_ = this->get_parameter("fps").as_int();
+        
+        // 形状识别参数
+        params_.enable_shape_detection = this->get_parameter("enable_shape_detection").as_bool();
+        params_.track_triangle = this->get_parameter("track_triangle").as_bool();
+        params_.track_rectangle = this->get_parameter("track_rectangle").as_bool();
+        params_.track_circle = this->get_parameter("track_circle").as_bool();
+        params_.min_regularity = this->get_parameter("min_regularity").as_double();
+        params_.circularity_threshold = this->get_parameter("circularity_threshold").as_double();
+        params_.rectangularity_threshold = this->get_parameter("rectangularity_threshold").as_double();
     }
 
     void initializeCamera() {
@@ -286,7 +529,7 @@ private:
             return;
         }
 
-        cv::Mat frame, hsv, mask;
+        cv::Mat frame, hsv, mask, maskRed, maskBlue;
         if (!cap_.read(frame) || frame.empty()) {
             RCLCPP_WARN(this->get_logger(), "读取帧失败");
             return;
@@ -294,33 +537,35 @@ private:
 
         // 图像处理
         cv::cvtColor(frame, hsv, cv::COLOR_BGR2HSV);
-        makeMaskHSV(hsv, params_.color_mode, mask);
+        makeMaskHSV(hsv, params_.color_mode, mask, maskRed, maskBlue);
 
-        // 目标检测
-        cv::Point2f raw_center, smoothed_center;
-        std::vector<cv::Point> contour;
-        bool found = findLargestCenter(mask, raw_center, contour, params_.min_area);
+        // 目标检测 - 使用新的形状识别系统
+        TargetInfo target;
+        bool found = findBestTarget(mask, maskRed, maskBlue, params_, target);
         
-        smoothed_center = center_smoother_->smooth(raw_center, found);
+        // 平滑中心点
+        cv::Point2f smoothed_center = center_smoother_->smooth(target.center, found);
+        if (found) {
+            target.center = smoothed_center;
+        }
 
         int w = frame.cols, h = frame.rows;
         cv::Point2f image_center(w * 0.5f, h * 0.5f);
         
         double deflection_rad = 0.0;
         int dy = 0;
-        bool valid = false;
+        bool valid = found && target.is_valid;
         
-        if (found) {
-            deflection_rad = calculateDeflectionRadians(smoothed_center, image_center, h);
-            dy = static_cast<int>(std::round(smoothed_center.y - image_center.y));
-            valid = true;
+        if (valid) {
+            deflection_rad = calculateDeflectionRadians(target.center, image_center, h);
+            dy = static_cast<int>(std::round(target.center.y - image_center.y));
         }
 
         // 发布结果
         publishResult(valid, deflection_rad, dy);
         
         // 可视化
-        visualizeResults(frame, valid, contour, smoothed_center, deflection_rad, dy);
+        visualizeResults(frame, target, deflection_rad, dy);
         publishImages(frame, mask);
 
         // 显示窗口
@@ -375,25 +620,37 @@ private:
         }
     }
 
-    void visualizeResults(cv::Mat& frame, bool valid,
-                         const std::vector<cv::Point>& contour,
-                         const cv::Point2f& center,
-                         double deflection_rad,
-                         int dy) {
+    void visualizeResults(cv::Mat& frame, const TargetInfo& target,
+                         double deflection_rad, int dy) {
         int w = frame.cols, h = frame.rows;
         cv::Point2f image_center(w * 0.5f, h * 0.5f);
+        bool valid = target.is_valid;
         
         if (valid) {
-            if (!contour.empty()) {
-                std::vector<std::vector<cv::Point>> contours_to_draw = {contour};
-                cv::drawContours(frame, contours_to_draw, -1, cv::Scalar(0, 100, 0), -1);
-                cv::drawContours(frame, contours_to_draw, -1, cv::Scalar(0, 255, 0), 3);
+            if (!target.contour.empty()) {
+                std::vector<std::vector<cv::Point>> contours_to_draw = {target.contour};
+                
+                // 根据颜色选择不同的显示颜色
+                cv::Scalar fill_color, outline_color;
+                if (target.color == ColorMode::Red) {
+                    fill_color = cv::Scalar(0, 0, 150);  // 深红色填充
+                    outline_color = cv::Scalar(0, 0, 255);  // 红色轮廓
+                } else if (target.color == ColorMode::Blue) {
+                    fill_color = cv::Scalar(150, 0, 0);  // 深蓝色填充
+                    outline_color = cv::Scalar(255, 0, 0);  // 蓝色轮廓
+                } else {
+                    fill_color = cv::Scalar(0, 100, 0);  // 深绿色填充
+                    outline_color = cv::Scalar(0, 255, 0);  // 绿色轮廓
+                }
+                
+                cv::drawContours(frame, contours_to_draw, -1, fill_color, -1);
+                cv::drawContours(frame, contours_to_draw, -1, outline_color, 3);
             }
             
-            cv::circle(frame, center, 6, cv::Scalar(0, 0, 255), cv::FILLED);
-            cv::circle(frame, center, 3, cv::Scalar(255, 255, 255), 2);
+            cv::circle(frame, target.center, 6, cv::Scalar(0, 0, 255), cv::FILLED);
+            cv::circle(frame, target.center, 3, cv::Scalar(255, 255, 255), 2);
             
-            cv::arrowedLine(frame, image_center, center, cv::Scalar(255, 255, 255), 2);
+            cv::arrowedLine(frame, image_center, target.center, cv::Scalar(255, 255, 255), 2);
             
             int line_length = 150;
             cv::Point deflection_end(
@@ -407,6 +664,7 @@ private:
                        deflection_rad * 180.0 / CV_PI, cv::Scalar(255, 100, 0), 2);
         }
         
+        // 绘制中心十字线
         cv::line(frame, cv::Point(image_center.x-20, image_center.y), 
                 cv::Point(image_center.x+20, image_center.y), cv::Scalar(255,255,255), 2);
         cv::line(frame, cv::Point(image_center.x, image_center.y-20), 
@@ -419,6 +677,7 @@ private:
         cv::line(frame, cv::Point(image_center.x, 0), cv::Point(image_center.x, h), 
                 cv::Scalar(100, 100, 100), 1);
         
+        // 顶部信息：模式和状态
         std::ostringstream info;
         double deflection_deg = deflection_rad * 180.0 / CV_PI;
         info << (params_.color_mode==ColorMode::Red?"RED":
@@ -430,12 +689,36 @@ private:
                    cv::FONT_HERSHEY_SIMPLEX, 0.7, cv::Scalar(0,255,0), 2);
         
         if (valid) {
+            // 第二行：形状和颜色信息
+            std::ostringstream shape_info;
+            shape_info << "Shape: " << getShapeName(target.shape) 
+                      << " | Color: " << (target.color == ColorMode::Red ? "RED" :
+                                         target.color == ColorMode::Blue ? "BLUE" : "BOTH")
+                      << " | Reg: " << std::fixed << std::setprecision(2) << target.regularity_score;
+            cv::putText(frame, shape_info.str(), cv::Point(10, 60), 
+                       cv::FONT_HERSHEY_SIMPLEX, 0.6, cv::Scalar(255,255,0), 2);
+            
+            // 第三行：方向和偏移
             std::ostringstream dir_info;
             dir_info << "fangxiang: " << getAngleDescription(deflection_rad) << " | Y: " << dy << "px";
-            cv::putText(frame, dir_info.str(), cv::Point(10, 60), 
-                       cv::FONT_HERSHEY_SIMPLEX, 0.6, cv::Scalar(255,255,0), 2);
+            cv::putText(frame, dir_info.str(), cv::Point(10, 90), 
+                       cv::FONT_HERSHEY_SIMPLEX, 0.6, cv::Scalar(255,200,0), 2);
+            
+            // 底部：面积信息
+            std::ostringstream area_info;
+            area_info << "Area: " << std::fixed << std::setprecision(0) << target.area 
+                     << " px (min: " << params_.min_area << ")";
+            cv::putText(frame, area_info.str(), cv::Point(10, frame.rows - 50), 
+                       cv::FONT_HERSHEY_SIMPLEX, 0.6, cv::Scalar(0,255,0), 2);
+        } else {
+            // 未检测到目标
+            std::ostringstream no_target;
+            no_target << "No valid target detected";
+            cv::putText(frame, no_target.str(), cv::Point(10, 60), 
+                       cv::FONT_HERSHEY_SIMPLEX, 0.6, cv::Scalar(0,0,255), 2);
         }
 
+        // 象限信息
         std::ostringstream quadrant_info;
         if (valid) {
             double deg = deflection_deg;
@@ -446,7 +729,7 @@ private:
         } else {
             quadrant_info << "none";
         }
-        cv::putText(frame, quadrant_info.str(), cv::Point(10, 90), 
+        cv::putText(frame, quadrant_info.str(), cv::Point(10, 120), 
                    cv::FONT_HERSHEY_SIMPLEX, 0.6, cv::Scalar(0,255,255), 2);
     }
 

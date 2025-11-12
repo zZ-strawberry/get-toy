@@ -7,9 +7,9 @@ color_tracking_node:
     fps: 30
 
     # 检测参数
-    min_area: 2000
-    max_area: 50000
-    contour_epsilon: 0.015
+    min_area: 2000        # 最小面积阈值(像素), 小于此面积的目标将被忽略
+    max_area: 50000       # 最大面积阈值(像素), 大于此面积的目标将被忽略
+    contour_epsilon: 0.015  # 轮廓近似精度
 
     # 发布配置
     publish_rate: 50.0
@@ -18,7 +18,17 @@ color_tracking_node:
     show_window: true
 
     # 颜色模式 (red/blue/both)
+    # 注意: 只有红色或蓝色的目标才会被追踪
     color_mode: "both"
 
     # 平滑参数
     smoothing_window: 5
+    
+    # 形状识别配置
+    enable_shape_detection: true    # 启用形状识别
+    track_triangle: true            # 追踪三角形
+    track_rectangle: true           # 追踪矩形
+    track_circle: true              # 追踪圆形
+    min_regularity: 0.5             # 最小规整度阈值(0-1)，用于选择最规整的轮廓
+    circularity_threshold: 0.7      # 圆形度阈值(0-1)，越接近1越像圆
+    rectangularity_threshold: 0.75  # 矩形度阈值(0-1)，越接近1越像矩形
