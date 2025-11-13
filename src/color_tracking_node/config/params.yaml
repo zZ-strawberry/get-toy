@@ -6,7 +6,7 @@ color_tracking_node:
     image_height: 480
     fps: 30
 
-    # 检测参数
+    # 检测参数 - 优化以区分蓝色和黑色
     min_area: 2000        # 最小面积阈值(像素), 小于此面积的目标将被忽略
     max_area: 50000       # 最大面积阈值(像素), 大于此面积的目标将被忽略
     contour_epsilon: 0.015  # 轮廓近似精度
@@ -17,8 +17,7 @@ color_tracking_node:
     publish_mask: false
     show_window: true
 
-    # 颜色模式 (red/blue/both)
-    # 注意: 只有红色或蓝色的目标才会被追踪
+
     color_mode: "both"
 
     # 平滑参数

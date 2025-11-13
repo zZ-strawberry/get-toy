@@ -243,9 +243,9 @@ private:
     }
     
     void publishData(bool hasTarget, float angle, float yOffsetPx) {
-        // 状态: 浮点数 0.00 或 1.00
+        // 状态: 浮点数 0.00 或 2.00
         auto status_msg = std_msgs::msg::Float32();
-        float status_val = hasTarget ? 1.0f : 0.0f;
+        float status_val = hasTarget ? 2.0f : 0.0f;
         status_msg.data = std::round(status_val * 100.0f) / 100.0f;
         status_pub_->publish(status_msg);
 
@@ -270,7 +270,7 @@ private:
     int morph_size_ = 3; // 形态学核大小
     
     // 新增：绝对最小面积阈值
-    double absolute_min_area_ = 2000.0;  // 可调整，过滤噪点
+    double absolute_min_area_ = 5000.0;  // 可调整，过滤噪点
     
     // 发布器类型全部改为 Float32
     rclcpp::Publisher<std_msgs::msg::Float32>::SharedPtr status_pub_;

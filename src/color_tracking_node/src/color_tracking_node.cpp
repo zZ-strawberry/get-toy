@@ -168,27 +168,79 @@ static ColorMode detectColor(const cv::Point2f& center, const cv::Mat& maskRed, 
     return ColorMode::Both;
 }
 
-// 创建颜色掩码（分别返回红色和蓝色掩码）
+// 计算图像平均亮度用于自适应调整
+static double calculateAverageBrightness(const cv::Mat& hsv) {
+    std::vector<cv::Mat> channels;
+    cv::split(hsv, channels);
+    cv::Scalar mean_val = cv::mean(channels[2]); // V通道
+    return mean_val[0];
+}
+
+// 创建颜色掩码（分别返回红色和蓝色掩码）- 改进版本，增强蓝黑区分能力
 static void makeMaskHSV(const cv::Mat& hsv, ColorMode mode, cv::Mat& maskOut, 
                        cv::Mat& maskRed, cv::Mat& maskBlue) {
     maskRed = cv::Mat::zeros(hsv.size(), CV_8UC1);
     maskBlue = cv::Mat::zeros(hsv.size(), CV_8UC1);
 
+    // 计算环境亮度进行自适应调整
+    double avg_brightness = calculateAverageBrightness(hsv);
+    
+    // 根据环境亮度动态调整阈值
+    int red_min_v = 70;
+    int blue_min_s = 150;  // 提高饱和度下限，排除黑色
+    int blue_min_v = 80;   // 提高亮度下限，排除黑色
+    int blue_max_v = 255;
+    
+    // 光线自适应：暗环境下降低亮度要求，但保持高饱和度要求
+    if (avg_brightness < 80) {
+        // 暗环境
+        red_min_v = 50;
+        blue_min_v = 60;
+        blue_min_s = 140;
+        blue_max_v = 220;
+    } else if (avg_brightness > 180) {
+        // 亮环境
+        red_min_v = 90;
+        blue_min_v = 100;
+        blue_min_s = 130;
+        blue_max_v = 255;
+    }
+
     if (mode == ColorMode::Red || mode == ColorMode::Both) {
         cv::Mat lower, upper;
-        cv::inRange(hsv, cv::Scalar(0,   120, 70), cv::Scalar(10,  255, 255), lower);
-        cv::inRange(hsv, cv::Scalar(170, 120, 70), cv::Scalar(180, 255, 255), upper);
+        cv::inRange(hsv, cv::Scalar(0,   120, red_min_v), cv::Scalar(10,  255, 255), lower);
+        cv::inRange(hsv, cv::Scalar(170, 120, red_min_v), cv::Scalar(180, 255, 255), upper);
         cv::bitwise_or(lower, upper, maskRed);
     }
+    
     if (mode == ColorMode::Blue || mode == ColorMode::Both) {
-        cv::inRange(hsv, cv::Scalar(100, 120, 60), cv::Scalar(140, 255, 255), maskBlue);
+        // 蓝色检测：严格的饱和度和亮度范围，排除黑色
+        // 黑色特征：低饱和度(S<50)、低亮度(V<50)
+        // 蓝色特征：高饱和度(S>130)、中高亮度(V>60)
+        cv::Mat blue_mask_primary, blue_mask_refined;
+        
+        // 第一步：基于色调和高饱和度筛选
+        cv::inRange(hsv, cv::Scalar(100, blue_min_s, blue_min_v), 
+                   cv::Scalar(130, 255, blue_max_v), blue_mask_primary);
+        
+        // 第二步：排除黑色区域（低饱和度+低亮度）
+        cv::Mat black_mask;
+        cv::inRange(hsv, cv::Scalar(0, 0, 0), cv::Scalar(180, 50, 50), black_mask);
+        
+        // 从蓝色掩码中减去黑色掩码
+        cv::bitwise_and(blue_mask_primary, cv::Scalar(255) - black_mask, maskBlue);
+        
+        // 第三步：额外的形态学操作去除噪声
+        cv::Mat kernel_erode = cv::getStructuringElement(cv::MORPH_ELLIPSE, cv::Size(3, 3));
+        cv::erode(maskBlue, maskBlue, kernel_erode, cv::Point(-1,-1), 1);
     }
 
     if (mode == ColorMode::Red) maskOut = maskRed.clone();
     else if (mode == ColorMode::Blue) maskOut = maskBlue.clone();
     else cv::bitwise_or(maskRed, maskBlue, maskOut);
 
-    cv::Mat kernel_open = cv::getStructuringElement(cv::MORPH_ELLIPSE, cv::Size(7, 7));
+    // 形态学操作优化
+    cv::Mat kernel_open = cv::getStructuringElement(cv::MORPH_ELLIPSE, cv::Size(5, 5));
     cv::Mat kernel_close = cv::getStructuringElement(cv::MORPH_ELLIPSE, cv::Size(9, 9));
     
     cv::morphologyEx(maskOut, maskOut, cv::MORPH_OPEN, kernel_open, cv::Point(-1,-1), 2);
@@ -349,6 +401,7 @@ public:
 
 // 计算目标点相对于画面中心竖直坐标轴上半轴的偏转弧度值
 static double calculateDeflectionRadians(const cv::Point2f& target, const cv::Point2f& center, int imageHeight) {
+    (void)imageHeight;  // 参数保留供未来使用
     float dx = target.x - center.x;
     float dy = center.y - target.y;
     
@@ -535,8 +588,34 @@ private:
             return;
         }
 
-        // 图像处理
-        cv::cvtColor(frame, hsv, cv::COLOR_BGR2HSV);
+        // 图像预处理：光线归一化和颜色增强
+        cv::Mat frame_enhanced = frame.clone();
+        
+        // 1. 使用CLAHE (限制对比度自适应直方图均衡化) 改善光照不均
+        cv::Mat lab;
+        cv::cvtColor(frame_enhanced, lab, cv::COLOR_BGR2Lab);
+        std::vector<cv::Mat> lab_channels;
+        cv::split(lab, lab_channels);
+        
+        cv::Ptr<cv::CLAHE> clahe = cv::createCLAHE(2.0, cv::Size(8, 8));
+        clahe->apply(lab_channels[0], lab_channels[0]);
+        
+        cv::merge(lab_channels, lab);
+        cv::cvtColor(lab, frame_enhanced, cv::COLOR_Lab2BGR);
+        
+        // 2. 轻微锐化以增强边缘
+        cv::Mat kernel = (cv::Mat_<float>(3,3) << 
+            0, -0.5, 0,
+            -0.5, 3, -0.5,
+            0, -0.5, 0);
+        cv::Mat sharpened;
+        cv::filter2D(frame_enhanced, sharpened, -1, kernel);
+        cv::addWeighted(frame_enhanced, 0.7, sharpened, 0.3, 0, frame_enhanced);
+        
+        // 3. 转换到HSV色彩空间
+        cv::cvtColor(frame_enhanced, hsv, cv::COLOR_BGR2HSV);
+        
+        // 创建颜色掩码
         makeMaskHSV(hsv, params_.color_mode, mask, maskRed, maskBlue);
 
         // 目标检测 - 使用新的形状识别系统
@@ -564,8 +643,11 @@ private:
         // 发布结果
         publishResult(valid, deflection_rad, dy);
         
+        // 获取环境亮度用于显示
+        double avg_brightness = calculateAverageBrightness(hsv);
+        
         // 可视化
-        visualizeResults(frame, target, deflection_rad, dy);
+        visualizeResults(frame, target, deflection_rad, dy, avg_brightness);
         publishImages(frame, mask);
 
         // 显示窗口
@@ -575,6 +657,10 @@ private:
     }
 
     void showCameraWindow(cv::Mat& frame, bool valid, double deflection_rad, int dy) {
+        (void)valid;  // 参数已在visualizeResults中使用，此处保留接口一致性
+        (void)deflection_rad;
+        (void)dy;
+        
         if (!window_initialized_) {
             cv::namedWindow("Color Tracking - Press 'q' to quit", cv::WINDOW_AUTOSIZE);
             window_initialized_ = true;
@@ -621,7 +707,7 @@ private:
     }
 
     void visualizeResults(cv::Mat& frame, const TargetInfo& target,
-                         double deflection_rad, int dy) {
+                         double deflection_rad, int dy, double avg_brightness = -1.0) {
         int w = frame.cols, h = frame.rows;
         cv::Point2f image_center(w * 0.5f, h * 0.5f);
         bool valid = target.is_valid;
@@ -685,6 +771,9 @@ private:
              << " | valid=" << (valid?1:0) 
              << " rad=" << std::fixed << std::setprecision(4) << deflection_rad
              << " (" << std::setprecision(1) << deflection_deg << "du)";
+        if (avg_brightness >= 0) {
+            info << " | Brightness=" << std::setprecision(0) << avg_brightness;
+        }
         cv::putText(frame, info.str(), cv::Point(10, 30), 
                    cv::FONT_HERSHEY_SIMPLEX, 0.7, cv::Scalar(0,255,0), 2);
         
