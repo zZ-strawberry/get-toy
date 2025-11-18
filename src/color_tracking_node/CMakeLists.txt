@@ -23,40 +23,20 @@ find_package(OpenCV REQUIRED)
 # 包含目录
 include_directories(include)
 
-# 创建可执行文件
-add_executable(color_tracking_node src/color_tracking_node.cpp)
-add_executable(basket src/basket.cpp)
-add_executable(task_scheduler src/task_scheduler.cpp)
+# 创建可执行文件 - 统一视觉节点
+add_executable(unified_vision_node src/unified_vision_node.cpp)
 
 # 链接库
-ament_target_dependencies(color_tracking_node
+ament_target_dependencies(unified_vision_node
   rclcpp
   std_msgs
-  geometry_msgs
-  sensor_msgs
-  cv_bridge
-  image_transport
   OpenCV
-)
-ament_target_dependencies(basket
-  rclcpp
-  sensor_msgs
-  geometry_msgs
-  std_msgs
-  cv_bridge
-  OpenCV
-)
-ament_target_dependencies(task_scheduler
-  rclcpp
-  std_msgs
 )
 
 # 安装可执行文件
-install(TARGETS color_tracking_node
+install(TARGETS unified_vision_node
   DESTINATION lib/${PROJECT_NAME}
 )
-install(TARGETS basket DESTINATION lib/${PROJECT_NAME})
-install(TARGETS task_scheduler DESTINATION lib/${PROJECT_NAME})
 
 # 安装launch文件
 install(DIRECTORY launch

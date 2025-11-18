@@ -27,8 +27,8 @@ public:
         
         RCLCPP_INFO(this->get_logger(), "任务调度节点已启动");
         RCLCPP_INFO(this->get_logger(), "等待任务命令...");
-        RCLCPP_INFO(this->get_logger(), "  发送 1 -> 启动颜色跟踪任务");
-        RCLCPP_INFO(this->get_logger(), "  发送 2 -> 启动识别放置框任务");
+        RCLCPP_INFO(this->get_logger(), "  发送 1 -> 启动颜色跟踪任务 (color_tracking_node)");
+        RCLCPP_INFO(this->get_logger(), "  发送 2 -> 启动识别放置框任务 (basket)");
         RCLCPP_INFO(this->get_logger(), "  发送 0 -> 停止当前任务");
     }
 
@@ -49,24 +49,24 @@ private:
         if (command == 0) {
             stop_current_task();
         } else if (command == 1) {
-            execute_task(1, "颜色跟踪任务", "color_tracking.launch.py");
+            execute_task(1, "颜色跟踪任务", "color_tracking_node");
         } else if (command == 2) {
-            execute_task(2, "识别放置框任务", "basket_detection.launch.py");
+            execute_task(2, "识别放置框任务", "basket");
         } else {
             RCLCPP_WARN(this->get_logger(), "未知的任务命令: %d", command);
         }
     }
 
     /**
-     * @brief 执行指定的任务
+     * @brief 执行指定的任务（直接运行节点可执行文件）
      */
-    void execute_task(int task_id, const std::string& task_name, const std::string& launch_file)
+    void execute_task(int task_id, const std::string& task_name, const std::string& executable)
     {
         // 如果已有任务在运行，先停止
         if (task_running_) {
             RCLCPP_INFO(this->get_logger(), "停止当前任务...");
             stop_current_task();
-            std::this_thread::sleep_for(std::chrono::seconds(1));
+            std::this_thread::sleep_for(std::chrono::milliseconds(500));
         }
 
         // 启动新任务
@@ -75,9 +75,9 @@ private:
 
         RCLCPP_INFO(this->get_logger(), "启动 %s...", task_name.c_str());
 
-        // 在新线程中启动launch文件
-        task_thread_ = std::thread([this, launch_file, task_name]() {
-            std::string command = "ros2 launch color_tracking_node " + launch_file;
+        // 在新线程中直接启动节点
+        task_thread_ = std::thread([this, executable, task_name]() {
+            std::string command = "ros2 run color_tracking_node " + executable;
             RCLCPP_INFO(this->get_logger(), "执行命令: %s", command.c_str());
             
             int result = std::system(command.c_str());
@@ -108,12 +108,13 @@ private:
 
         RCLCPP_INFO(this->get_logger(), "正在停止任务 %d...", current_task_.load());
 
-        // 发送停止命令 (通过系统命令杀死相关进程)
-        // 注意：这是一个简单的实现，实际应用中可能需要更优雅的方式
+        // 直接杀死对应的节点进程
         if (current_task_ == 1) {
-            std::system("pkill -f color_tracking_node");
+            std::system("pkill -9 -f color_tracking_node");
+            RCLCPP_INFO(this->get_logger(), "已杀死 color_tracking_node 进程");
         } else if (current_task_ == 2) {
-            std::system("pkill -f basket");
+            std::system("pkill -9 -f basket");
+            RCLCPP_INFO(this->get_logger(), "已杀死 basket 进程");
         }
 
         task_running_ = false;
